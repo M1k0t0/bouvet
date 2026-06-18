@@ -105,6 +105,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     # Required for healthcheck and rootfs download
     curl \
+    # Required for optional Firecracker TAP/NAT internet access
+    iproute2 \
+    iptables \
+    procps \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 

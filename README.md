@@ -28,7 +28,7 @@
 
 Bouvet (boo-veh) is an MCP server that creates secure, isolated sandboxes for AI agents to execute code.
 
-When an AI agent needs to run Python, Node.js, or shell commands, Bouvet spins up a lightweight microVM in ~200ms. The code runs in complete isolation separate kernel filesystem and network then the sandbox is destroyed. Nothing persists, nothing leaks.
+When an AI agent needs to run Python, Node.js, or shell commands, Bouvet spins up a lightweight microVM in ~200ms. The code runs in complete isolation with a separate kernel, filesystem, and isolated-by-default network, then the sandbox is destroyed. Nothing persists, nothing leaks.
 
 **The problem it solves:** AI agents need a safe place to run untrusted code. Docker isn't enough containers share the host kernel. Bouvet uses [Firecracker](https://firecracker-microvm.github.io/) microVMs for true hardware-level isolation the same technology that powers AWS Lambda.
 
@@ -63,6 +63,60 @@ Each microVM has ~256MB RAM, 1 vCPU, and a full Linux environment with Python, N
 - **Fast Startup** — Warm pool enables sub-200ms sandbox creation
 - **Multi-Language** — Python, Node.js, Rust, Bash, and shell access
 - **MCP Native** — Works with Claude, Cursor, and any MCP client
+- **Optional Internet Access** — Per-sandbox TAP/NAT networking when explicitly enabled
+
+---
+
+## Docker Compose
+
+Bouvet needs Linux KVM access. For optional microVM internet access, the
+container also needs permission to create TAP devices and manage NAT rules.
+
+```yaml
+services:
+  bouvet:
+    image: ghcr.io/vrn21/bouvet-mcp:latest
+    container_name: bouvet-mcp
+    restart: unless-stopped
+    privileged: true
+    security_opt:
+      - seccomp=unconfined
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "8080:8080"
+    environment:
+      BOUVET_TRANSPORT: http
+      BOUVET_HTTP_HOST: 0.0.0.0
+      BOUVET_HTTP_PORT: "8080"
+      BOUVET_POOL_ENABLED: "true"
+      BOUVET_POOL_MIN_SIZE: "3"
+
+      # Keep sandboxes network-isolated by default. Set to "true" for
+      # public-internet egress; host/container/private/other-sandbox ranges stay blocked.
+      BOUVET_INTERNET_ENABLED: "false"
+      BOUVET_INTERNET_OUTBOUND_IFACE: eth0
+      BOUVET_INTERNET_DNS: 1.1.1.1,8.8.8.8
+      # Add host-specific public IPs here if the Docker host is reachable by one.
+      BOUVET_INTERNET_BLOCKED_CIDRS: ""
+    volumes:
+      - bouvet-data:/var/lib/bouvet
+    tmpfs:
+      - /tmp/bouvet
+
+volumes:
+  bouvet-data:
+```
+
+Start it with:
+
+```bash
+docker compose up -d
+```
+
+In Docker bridge mode, `BOUVET_INTERNET_OUTBOUND_IFACE` should usually be
+`eth0`, the interface inside the container.
 
 ---
 

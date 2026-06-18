@@ -445,7 +445,7 @@ Bouvet uses **vsock** (AF_VSOCK) — a socket family for VM ↔ hypervisor commu
 │  │  │                  Guest Kernel                      │  │  │
 │  │  │  • Separate kernel (not shared with host)         │  │  │
 │  │  │  • No access to host filesystem                   │  │  │
-│  │  │  • No access to host network                      │  │  │
+│  │  │  • Optional TAP internet only when enabled       │  │  │
 │  │  │  • Memory isolated by hypervisor                  │  │  │
 │  │  └───────────────────────────────────────────────────┘  │  │
 │  │                                                          │  │
@@ -468,7 +468,7 @@ Bouvet uses **vsock** (AF_VSOCK) — a socket family for VM ↔ hypervisor commu
 | Memory     | Hardware (KVM) — separate physical pages |
 | CPU        | Hardware (KVM) — VMCS isolation          |
 | Filesystem | Separate ext4 image (copy-on-write)      |
-| Network    | No network by default                    |
+| Network    | No network by default; optional per-sandbox TAP/NAT public egress with host/private/sandbox CIDRs blocked |
 | Processes  | Separate PID namespace                   |
 | Users      | Separate user namespace                  |
 
@@ -477,7 +477,7 @@ Bouvet uses **vsock** (AF_VSOCK) — a socket family for VM ↔ hypervisor commu
 | Vector              | Mitigation                                   |
 | ------------------- | -------------------------------------------- |
 | Guest → Host escape | KVM + Firecracker seccomp                    |
-| Agent vulnerability | Minimal attack surface, no network           |
+| Agent vulnerability | Minimal attack surface, vsock-only host control plane |
 | Resource exhaustion | Memory/CPU limits, timeout enforcement       |
 | Persistent access   | Sandboxes are ephemeral, destroyed after use |
 
@@ -592,7 +592,6 @@ Complete flow for running Python code:
 
 - **Snapshots**: Faster restore from memory snapshots
 - **ARM support**: a1.metal instances for cost reduction
-- **Network access**: Optional controlled internet access
 
 ### Not Planned
 

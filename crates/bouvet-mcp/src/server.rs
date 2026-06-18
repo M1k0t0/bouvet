@@ -43,23 +43,33 @@ impl BouvetServer {
             "Creating BouvetServer"
         );
 
-        let manager_config = ManagerConfig::new(
+        let mut manager_config = ManagerConfig::new(
             &config.kernel_path,
             &config.rootfs_path,
             &config.firecracker_path,
             &config.chroot_path,
         );
+        if config.internet_enabled {
+            manager_config = manager_config.with_internet_access(config.internet_access.clone());
+        }
 
         let manager = Arc::new(SandboxManager::new(manager_config));
 
         // Create pool if enabled
         let pool = if config.pool_enabled {
+            let mut sandbox_config = SandboxConfig::builder()
+                .kernel(&config.kernel_path)
+                .rootfs(&config.rootfs_path)
+                .firecracker_path(&config.firecracker_path)
+                .chroot_path(&config.chroot_path);
+            if config.internet_enabled {
+                sandbox_config = sandbox_config.internet_access(config.internet_access.clone());
+            }
+
             let pool_config = PoolConfig {
                 min_size: config.pool_min_size,
                 max_concurrent_boots: config.pool_max_boots,
-                sandbox_config: SandboxConfig::builder()
-                    .kernel(&config.kernel_path)
-                    .rootfs(&config.rootfs_path)
+                sandbox_config: sandbox_config
                     .build()
                     .expect("valid sandbox config from validated paths"),
                 ..Default::default()
@@ -68,6 +78,7 @@ impl BouvetServer {
                 pool_enabled = true,
                 min_size = config.pool_min_size,
                 max_boots = config.pool_max_boots,
+                internet_enabled = config.internet_enabled,
                 "Warm pool configured"
             );
             Some(Arc::new(TokioMutex::new(SandboxPool::new(pool_config))))
@@ -206,44 +217,50 @@ impl BouvetServer {
         tracing::info!(
             memory_mib = params.memory_mib,
             vcpu_count = params.vcpu_count,
+            internet_access = params.internet_access,
             "Tool: create_sandbox"
         );
 
         // Try to acquire from warm pool first
-        if let Some(pool) = &self.pool {
-            tracing::debug!("Attempting to acquire from warm pool");
-            let acquire_result = {
-                let pool_guard = pool.lock().await;
-                pool_guard.acquire().await
-            };
+        let can_use_pool = params.memory_mib.is_none()
+            && params.vcpu_count.is_none()
+            && params.internet_access.is_none();
+        if can_use_pool {
+            if let Some(pool) = &self.pool {
+                tracing::debug!("Attempting to acquire from warm pool");
+                let acquire_result = {
+                    let pool_guard = pool.lock().await;
+                    pool_guard.acquire().await
+                };
 
-            match acquire_result {
-                Ok(sandbox) => {
-                    // Register the pooled sandbox with manager for lifecycle tracking
-                    match self.manager.register(sandbox).await {
-                        Ok(id) => {
-                            tracing::info!(
-                                sandbox_id = %id,
-                                elapsed_ms = start.elapsed().as_millis() as u64,
-                                source = "pool",
-                                "Sandbox created"
-                            );
-                            return Self::json_result(&CreateSandboxResult {
-                                sandbox_id: id.to_string(),
-                            });
-                        }
-                        Err((e, sandbox)) => {
-                            // Registration failed - must destroy sandbox to prevent leak
-                            tracing::error!(error = %e, "Failed to register pooled sandbox, destroying");
-                            if let Err(destroy_err) = sandbox.destroy().await {
-                                tracing::error!(error = %destroy_err, "Failed to destroy unregistered sandbox");
+                match acquire_result {
+                    Ok(sandbox) => {
+                        // Register the pooled sandbox with manager for lifecycle tracking
+                        match self.manager.register(sandbox).await {
+                            Ok(id) => {
+                                tracing::info!(
+                                    sandbox_id = %id,
+                                    elapsed_ms = start.elapsed().as_millis() as u64,
+                                    source = "pool",
+                                    "Sandbox created"
+                                );
+                                return Self::json_result(&CreateSandboxResult {
+                                    sandbox_id: id.to_string(),
+                                });
                             }
-                            // Fall through to cold-start
+                            Err((e, sandbox)) => {
+                                // Registration failed - must destroy sandbox to prevent leak
+                                tracing::error!(error = %e, "Failed to register pooled sandbox, destroying");
+                                if let Err(destroy_err) = sandbox.destroy().await {
+                                    tracing::error!(error = %destroy_err, "Failed to destroy unregistered sandbox");
+                                }
+                                // Fall through to cold-start
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "Pool acquire failed, falling back to cold-start");
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Pool acquire failed, falling back to cold-start");
+                    }
                 }
             }
         }
@@ -252,7 +269,9 @@ impl BouvetServer {
         tracing::debug!("Creating sandbox via cold-start");
         let mut config_builder = SandboxConfig::builder()
             .kernel(&self.config.kernel_path)
-            .rootfs(&self.config.rootfs_path);
+            .rootfs(&self.config.rootfs_path)
+            .firecracker_path(&self.config.firecracker_path)
+            .chroot_path(&self.config.chroot_path);
 
         if let Some(memory) = params.memory_mib {
             config_builder = config_builder.memory_mib(memory);
@@ -260,6 +279,11 @@ impl BouvetServer {
 
         if let Some(vcpus) = params.vcpu_count {
             config_builder = config_builder.vcpu_count(vcpus);
+        }
+
+        let internet_enabled = params.internet_access.unwrap_or(self.config.internet_enabled);
+        if internet_enabled {
+            config_builder = config_builder.internet_access(self.config.internet_access.clone());
         }
 
         let sandbox_config = match config_builder.build() {

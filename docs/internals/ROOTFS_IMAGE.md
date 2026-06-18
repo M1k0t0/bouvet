@@ -68,7 +68,7 @@ Key filesystem entries:
 |------|---------|
 | `/etc/fstab` | Contains `/dev/vda / ext4 defaults 0 1` |
 | `/etc/hostname` | Set to `bouvet` |
-| `/etc/network/interfaces` | Auto DHCP on eth0 |
+| `/etc/network/interfaces` | Loopback plus manual eth0; internet-enabled sandboxes receive static IP config via kernel boot arguments |
 
 ---
 

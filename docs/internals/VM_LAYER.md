@@ -66,6 +66,7 @@ bouvet-vm/src/
 | [`VmState`](file:///Users/vrn21/Developer/rust/petty/crates/bouvet-vm/src/machine.rs#L30-L41) | machine.rs | State enum: Creating, Running, Paused, Stopped |
 | [`DriveConfig`](file:///Users/vrn21/Developer/rust/petty/crates/bouvet-vm/src/config.rs#L105-L114) | config.rs | Block device configuration |
 | [`NetworkConfig`](file:///Users/vrn21/Developer/rust/petty/crates/bouvet-vm/src/config.rs#L129-L136) | config.rs | Network interface configuration |
+| `HostNetworkConfig` | config.rs | Optional host TAP, forwarding, and NAT setup for internet access |
 | [`VmError`](file:///Users/vrn21/Developer/rust/petty/crates/bouvet-vm/src/error.rs) | error.rs | Error types for VM operations |
 
 ---
@@ -101,6 +102,7 @@ let vm = VmBuilder::new()
 | `rootfs_read_only()` | Make root drive read-only |
 | `with_drive(id, path)` | Add an extra block device |
 | `with_network(tap_dev)` | Add network interface with TAP device |
+| `with_network_config(config)` | Add network interface with optional host-side TAP/NAT setup |
 | `with_vsock(cid)` | Configure vsock with guest CID |
 | `firecracker_path(path)` | Set Firecracker binary location |
 | `chroot_path(path)` | Set working directory for VM state |
@@ -200,24 +202,27 @@ The `VirtualMachine::create()` method performs the following sequence:
    └── Executor (FirecrackerExecutorBuilder)
        │
        ▼
-3. Create Machine (machine.create())
+3. Create TAP/NAT host resources (only when HostNetworkConfig is set)
+       │
+       ▼
+4. Create Machine (machine.create())
    └── Spawns Firecracker process
    └── Creates API socket at: {chroot_path}/{vm_id}/firecracker.socket
        │
        ▼
-4. Configure machine resources via direct API
+5. Configure machine resources via direct API
    └── PUT /machine-config (vcpu, memory)
        │
        ▼
-5. Configure vsock via direct API (if enabled)
+6. Configure vsock via direct API (if enabled)
    └── PUT /vsock (cid, uds_path)
        │
        ▼
-6. Start VM (machine.start())
+7. Start VM (machine.start())
    └── PUT /actions { action_type: "InstanceStart" }
        │
        ▼
-7. Return VirtualMachine { state: Running }
+8. Return VirtualMachine { state: Running }
 ```
 
 ### VirtualMachine Methods

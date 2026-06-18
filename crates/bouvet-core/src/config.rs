@@ -1,6 +1,7 @@
 //! Sandbox configuration types.
 
 use crate::error::CoreError;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -11,6 +12,8 @@ pub struct SandboxConfig {
     pub kernel_path: PathBuf,
     /// Path to rootfs image.
     pub rootfs_path: PathBuf,
+    /// Path to Firecracker binary.
+    pub firecracker_path: PathBuf,
     /// Working directory for VM sockets and state.
     pub chroot_path: PathBuf,
     /// Memory in MiB (default: 256).
@@ -21,6 +24,8 @@ pub struct SandboxConfig {
     pub timeout: Option<Duration>,
     /// Guest CID for vsock (default: 3, must be >= 3).
     pub vsock_cid: u32,
+    /// Optional internet access configuration.
+    pub internet_access: Option<InternetAccessConfig>,
 }
 
 impl Default for SandboxConfig {
@@ -28,11 +33,13 @@ impl Default for SandboxConfig {
         Self {
             kernel_path: PathBuf::new(),
             rootfs_path: PathBuf::new(),
+            firecracker_path: PathBuf::from("/usr/local/bin/firecracker"),
             chroot_path: PathBuf::from("/tmp/bouvet"),
             memory_mib: 256,
             vcpu_count: 2,
             timeout: None,
             vsock_cid: 3,
+            internet_access: None,
         }
     }
 }
@@ -60,6 +67,72 @@ impl SandboxConfig {
         if self.vsock_cid < 3 {
             return Err(CoreError::Connection("vsock_cid must be >= 3".into()));
         }
+        if let Some(internet_access) = &self.internet_access {
+            internet_access.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Configuration for optional sandbox internet access.
+#[derive(Debug, Clone)]
+pub struct InternetAccessConfig {
+    /// First two octets used for per-sandbox /30 networks.
+    ///
+    /// For the default `172.30`, sandbox CIDs are assigned networks like
+    /// `172.30.0.0/30`, `172.30.0.4/30`, etc.
+    pub ipv4_prefix: [u8; 2],
+    /// Optional outbound host interface for NAT rules.
+    pub outbound_iface: Option<String>,
+    /// DNS servers written into the guest after the agent connects.
+    pub dns_servers: Vec<Ipv4Addr>,
+    /// Extra destination CIDRs to block from internet-enabled guests.
+    pub blocked_cidrs: Vec<String>,
+}
+
+impl Default for InternetAccessConfig {
+    fn default() -> Self {
+        Self {
+            ipv4_prefix: [172, 30],
+            outbound_iface: None,
+            dns_servers: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
+            blocked_cidrs: Vec::new(),
+        }
+    }
+}
+
+impl InternetAccessConfig {
+    /// Validate internet access settings.
+    pub fn validate(&self) -> Result<(), CoreError> {
+        if self.ipv4_prefix[0] == 0 || self.ipv4_prefix[0] >= 224 {
+            return Err(CoreError::Connection(format!(
+                "internet ipv4 prefix must be unicast, got {}.{}",
+                self.ipv4_prefix[0], self.ipv4_prefix[1]
+            )));
+        }
+
+        if let Some(iface) = &self.outbound_iface {
+            if iface.is_empty() {
+                return Err(CoreError::Connection(
+                    "internet outbound interface must not be empty".into(),
+                ));
+            }
+        }
+
+        if self.dns_servers.is_empty() {
+            return Err(CoreError::Connection(
+                "internet DNS server list must not be empty".into(),
+            ));
+        }
+
+        for cidr in &self.blocked_cidrs {
+            if cidr.is_empty() {
+                return Err(CoreError::Connection(
+                    "internet blocked CIDR must not be empty".into(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -80,6 +153,12 @@ impl SandboxConfigBuilder {
     /// Set the rootfs path.
     pub fn rootfs(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.rootfs_path = path.into();
+        self
+    }
+
+    /// Set the Firecracker binary path.
+    pub fn firecracker_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.firecracker_path = path.into();
         self
     }
 
@@ -113,6 +192,18 @@ impl SandboxConfigBuilder {
         self
     }
 
+    /// Enable internet access with the given configuration.
+    pub fn internet_access(mut self, config: InternetAccessConfig) -> Self {
+        self.config.internet_access = Some(config);
+        self
+    }
+
+    /// Enable internet access with default settings.
+    pub fn enable_internet_access(mut self) -> Self {
+        self.config.internet_access = Some(InternetAccessConfig::default());
+        self
+    }
+
     /// Build the configuration, validating all required fields.
     pub fn build(self) -> Result<SandboxConfig, CoreError> {
         self.config.validate()?;
@@ -130,6 +221,7 @@ mod tests {
         assert_eq!(config.memory_mib, 256);
         assert_eq!(config.vcpu_count, 2);
         assert!(config.timeout.is_none());
+        assert!(config.internet_access.is_none());
     }
 
     #[test]
@@ -151,6 +243,7 @@ mod tests {
         let config = SandboxConfig::builder()
             .kernel("/path/to/vmlinux")
             .rootfs("/path/to/rootfs.ext4")
+            .firecracker_path("/path/to/firecracker")
             .memory_mib(512)
             .vcpu_count(4)
             .timeout(Duration::from_secs(60))
@@ -159,8 +252,59 @@ mod tests {
 
         assert_eq!(config.kernel_path, PathBuf::from("/path/to/vmlinux"));
         assert_eq!(config.rootfs_path, PathBuf::from("/path/to/rootfs.ext4"));
+        assert_eq!(
+            config.firecracker_path,
+            PathBuf::from("/path/to/firecracker")
+        );
         assert_eq!(config.memory_mib, 512);
         assert_eq!(config.vcpu_count, 4);
         assert_eq!(config.timeout, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_enable_internet_access() {
+        let config = SandboxConfig::builder()
+            .kernel("/path/to/vmlinux")
+            .rootfs("/path/to/rootfs.ext4")
+            .enable_internet_access()
+            .build()
+            .expect("should build successfully");
+
+        let internet = config.internet_access.expect("internet config");
+        assert_eq!(internet.ipv4_prefix, [172, 30]);
+        assert_eq!(internet.dns_servers.len(), 2);
+    }
+
+    #[test]
+    fn test_internet_access_validation() {
+        let result = SandboxConfig::builder()
+            .kernel("/path/to/vmlinux")
+            .rootfs("/path/to/rootfs.ext4")
+            .internet_access(InternetAccessConfig {
+                ipv4_prefix: [224, 0],
+                ..Default::default()
+            })
+            .build();
+        assert!(result.is_err());
+
+        let result = SandboxConfig::builder()
+            .kernel("/path/to/vmlinux")
+            .rootfs("/path/to/rootfs.ext4")
+            .internet_access(InternetAccessConfig {
+                dns_servers: Vec::new(),
+                ..Default::default()
+            })
+            .build();
+        assert!(result.is_err());
+
+        let result = SandboxConfig::builder()
+            .kernel("/path/to/vmlinux")
+            .rootfs("/path/to/rootfs.ext4")
+            .internet_access(InternetAccessConfig {
+                blocked_cidrs: vec!["".into()],
+                ..Default::default()
+            })
+            .build();
+        assert!(result.is_err());
     }
 }

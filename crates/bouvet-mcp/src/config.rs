@@ -2,6 +2,7 @@
 //!
 //! Configuration is loaded from environment variables with sensible defaults.
 
+use bouvet_core::InternetAccessConfig;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -68,6 +69,12 @@ pub struct BouvetConfig {
     /// Maximum concurrent boots during pool fill (default: 2).
     pub pool_max_boots: usize,
 
+    /// Enable internet access by default for sandboxes (default: false).
+    pub internet_enabled: bool,
+
+    /// Internet access settings used when enabled.
+    pub internet_access: InternetAccessConfig,
+
     /// Transport mode (default: both stdio and HTTP).
     pub transport_mode: TransportMode,
 
@@ -89,6 +96,9 @@ pub enum ConfigError {
 
     #[error("chroot parent directory not found: {0}")]
     InvalidChroot(PathBuf),
+
+    #[error("invalid internet access configuration")]
+    InvalidInternetConfig,
 }
 
 impl Default for BouvetConfig {
@@ -101,6 +111,8 @@ impl Default for BouvetConfig {
             pool_enabled: true,
             pool_min_size: 3,
             pool_max_boots: 2,
+            internet_enabled: false,
+            internet_access: InternetAccessConfig::default(),
             transport_mode: TransportMode::Both,
             http_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080),
         }
@@ -108,6 +120,51 @@ impl Default for BouvetConfig {
 }
 
 impl BouvetConfig {
+    fn env_bool(name: &str, default: bool) -> bool {
+        std::env::var(name)
+            .map(|v| {
+                !matches!(
+                    v.to_lowercase().as_str(),
+                    "false" | "0" | "no" | "off" | "disabled"
+                )
+            })
+            .unwrap_or(default)
+    }
+
+    fn parse_ipv4_prefix(value: &str) -> Option<[u8; 2]> {
+        let mut parts = value.split('.');
+        let first = parts.next()?.parse().ok()?;
+        let second = parts.next()?.parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some([first, second])
+    }
+
+    fn parse_dns_servers(value: &str) -> Option<Vec<Ipv4Addr>> {
+        let servers: Vec<Ipv4Addr> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.parse().ok())
+            .collect();
+
+        if servers.is_empty() {
+            None
+        } else {
+            Some(servers)
+        }
+    }
+
+    fn parse_list(value: &str) -> Vec<String> {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(ToString::to_string)
+            .collect()
+    }
+
     /// Load configuration from environment variables.
     ///
     /// | Variable | Default |
@@ -119,6 +176,11 @@ impl BouvetConfig {
     /// | `BOUVET_POOL_ENABLED` | `true` |
     /// | `BOUVET_POOL_MIN_SIZE` | `3` |
     /// | `BOUVET_POOL_MAX_BOOTS` | `2` |
+    /// | `BOUVET_INTERNET_ENABLED` | `false` |
+    /// | `BOUVET_INTERNET_IPV4_PREFIX` | `172.30` |
+    /// | `BOUVET_INTERNET_OUTBOUND_IFACE` | unset |
+    /// | `BOUVET_INTERNET_DNS` | `1.1.1.1,8.8.8.8` |
+    /// | `BOUVET_INTERNET_BLOCKED_CIDRS` | unset |
     /// | `BOUVET_TRANSPORT` | `both` (stdio, http, both) |
     /// | `BOUVET_HTTP_HOST` | `0.0.0.0` |
     /// | `BOUVET_HTTP_PORT` | `8080` |
@@ -135,6 +197,26 @@ impl BouvetConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8080);
 
+        let mut internet_access = default.internet_access.clone();
+        if let Some(prefix) = std::env::var("BOUVET_INTERNET_IPV4_PREFIX")
+            .ok()
+            .and_then(|v| Self::parse_ipv4_prefix(&v))
+        {
+            internet_access.ipv4_prefix = prefix;
+        }
+        internet_access.outbound_iface = std::env::var("BOUVET_INTERNET_OUTBOUND_IFACE")
+            .ok()
+            .filter(|v| !v.is_empty());
+        if let Some(dns_servers) = std::env::var("BOUVET_INTERNET_DNS")
+            .ok()
+            .and_then(|v| Self::parse_dns_servers(&v))
+        {
+            internet_access.dns_servers = dns_servers;
+        }
+        if let Ok(blocked_cidrs) = std::env::var("BOUVET_INTERNET_BLOCKED_CIDRS") {
+            internet_access.blocked_cidrs = Self::parse_list(&blocked_cidrs);
+        }
+
         Self {
             kernel_path: std::env::var("BOUVET_KERNEL")
                 .map(PathBuf::from)
@@ -148,9 +230,7 @@ impl BouvetConfig {
             chroot_path: std::env::var("BOUVET_CHROOT")
                 .map(PathBuf::from)
                 .unwrap_or(default.chroot_path),
-            pool_enabled: std::env::var("BOUVET_POOL_ENABLED")
-                .map(|v| v != "false" && v != "0")
-                .unwrap_or(default.pool_enabled),
+            pool_enabled: Self::env_bool("BOUVET_POOL_ENABLED", default.pool_enabled),
             pool_min_size: std::env::var("BOUVET_POOL_MIN_SIZE")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -159,6 +239,8 @@ impl BouvetConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(default.pool_max_boots),
+            internet_enabled: Self::env_bool("BOUVET_INTERNET_ENABLED", default.internet_enabled),
+            internet_access,
             transport_mode: std::env::var("BOUVET_TRANSPORT")
                 .map(|v| TransportMode::parse(&v))
                 .unwrap_or(default.transport_mode),
@@ -191,6 +273,10 @@ impl BouvetConfig {
             }
         }
 
+        self.internet_access
+            .validate()
+            .map_err(|_| ConfigError::InvalidInternetConfig)?;
+
         Ok(())
     }
 
@@ -209,12 +295,19 @@ impl BouvetConfig {
         if !self.firecracker_path.exists() {
             tracing::warn!("Firecracker not found: {:?}", self.firecracker_path);
         }
+
+        if let Err(e) = self.internet_access.validate() {
+            tracing::warn!("Internet access configuration is invalid: {e}");
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn test_default_config() {
@@ -229,6 +322,8 @@ mod tests {
             PathBuf::from("/usr/local/bin/firecracker")
         );
         assert_eq!(config.chroot_path, PathBuf::from("/tmp/bouvet"));
+        assert!(!config.internet_enabled);
+        assert_eq!(config.internet_access.ipv4_prefix, [172, 30]);
         assert_eq!(config.transport_mode, TransportMode::Both);
         assert_eq!(config.http_addr.port(), 8080);
     }
@@ -257,6 +352,8 @@ mod tests {
 
     #[test]
     fn test_from_env_uses_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
         // Clear any existing env vars
         std::env::remove_var("BOUVET_KERNEL");
         std::env::remove_var("BOUVET_ROOTFS");
@@ -265,6 +362,11 @@ mod tests {
         std::env::remove_var("BOUVET_TRANSPORT");
         std::env::remove_var("BOUVET_HTTP_HOST");
         std::env::remove_var("BOUVET_HTTP_PORT");
+        std::env::remove_var("BOUVET_INTERNET_ENABLED");
+        std::env::remove_var("BOUVET_INTERNET_IPV4_PREFIX");
+        std::env::remove_var("BOUVET_INTERNET_OUTBOUND_IFACE");
+        std::env::remove_var("BOUVET_INTERNET_DNS");
+        std::env::remove_var("BOUVET_INTERNET_BLOCKED_CIDRS");
 
         let config = BouvetConfig::from_env();
         let default = BouvetConfig::default();
@@ -273,7 +375,49 @@ mod tests {
         assert_eq!(config.rootfs_path, default.rootfs_path);
         assert_eq!(config.firecracker_path, default.firecracker_path);
         assert_eq!(config.chroot_path, default.chroot_path);
+        assert_eq!(config.internet_enabled, default.internet_enabled);
+        assert_eq!(
+            config.internet_access.ipv4_prefix,
+            default.internet_access.ipv4_prefix
+        );
         assert_eq!(config.transport_mode, TransportMode::Both);
+    }
+
+    #[test]
+    fn test_internet_env_parsing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        std::env::set_var("BOUVET_INTERNET_ENABLED", "true");
+        std::env::set_var("BOUVET_INTERNET_IPV4_PREFIX", "10.77");
+        std::env::set_var("BOUVET_INTERNET_OUTBOUND_IFACE", "eth9");
+        std::env::set_var("BOUVET_INTERNET_DNS", "9.9.9.9,1.0.0.1");
+        std::env::set_var(
+            "BOUVET_INTERNET_BLOCKED_CIDRS",
+            "203.0.113.10/32,198.51.100.0/24",
+        );
+
+        let config = BouvetConfig::from_env();
+
+        assert!(config.internet_enabled);
+        assert_eq!(config.internet_access.ipv4_prefix, [10, 77]);
+        assert_eq!(
+            config.internet_access.outbound_iface.as_deref(),
+            Some("eth9")
+        );
+        assert_eq!(
+            config.internet_access.dns_servers,
+            vec![Ipv4Addr::new(9, 9, 9, 9), Ipv4Addr::new(1, 0, 0, 1)]
+        );
+        assert_eq!(
+            config.internet_access.blocked_cidrs,
+            vec!["203.0.113.10/32".to_string(), "198.51.100.0/24".to_string()]
+        );
+
+        std::env::remove_var("BOUVET_INTERNET_ENABLED");
+        std::env::remove_var("BOUVET_INTERNET_IPV4_PREFIX");
+        std::env::remove_var("BOUVET_INTERNET_OUTBOUND_IFACE");
+        std::env::remove_var("BOUVET_INTERNET_DNS");
+        std::env::remove_var("BOUVET_INTERNET_BLOCKED_CIDRS");
     }
 
     #[test]

@@ -61,6 +61,48 @@ The warm pool pre-boots sandboxes for faster allocation (~150ms vs ~500ms cold s
 
 ---
 
+## Internet Access
+
+Sandboxes are network-isolated by default. Enable internet access only on hosts
+where Bouvet can create TAP interfaces and manage forwarding/NAT rules.
+
+| Variable                         | Default           | Description                                      |
+| -------------------------------- | ----------------- | ------------------------------------------------ |
+| `BOUVET_INTERNET_ENABLED`        | `false`           | Enable internet access by default for sandboxes  |
+| `BOUVET_INTERNET_IPV4_PREFIX`    | `172.30`          | First two octets for per-sandbox `/30` networks  |
+| `BOUVET_INTERNET_OUTBOUND_IFACE` | unset             | Optional outbound host interface for NAT rules   |
+| `BOUVET_INTERNET_DNS`            | `1.1.1.1,8.8.8.8` | DNS servers written into internet-enabled guests |
+| `BOUVET_INTERNET_BLOCKED_CIDRS`  | unset             | Extra comma-separated destination CIDRs to block |
+
+When enabled, Bouvet creates one TAP device per sandbox, attaches it to
+Firecracker, assigns a static guest IPv4 address through kernel boot arguments,
+enables host IPv4 forwarding, and installs per-sandbox `iptables` rules. These
+rules allow public internet egress while dropping traffic to the Bouvet
+host/container namespace, other Bouvet sandbox CIDRs, private RFC1918 ranges,
+carrier-grade NAT, loopback, link-local/metadata, multicast, reserved address
+space, and any CIDRs listed in `BOUVET_INTERNET_BLOCKED_CIDRS`. The TAP device
+and firewall rules are removed when the VM is destroyed.
+
+Host requirements:
+
+| Command    | Purpose                                  |
+| ---------- | ---------------------------------------- |
+| `ip`       | Create and configure TAP interfaces      |
+| `sysctl`   | Enable `net.ipv4.ip_forward`             |
+| `iptables` | Install per-sandbox NAT/forwarding rules |
+
+Example:
+
+```bash
+export BOUVET_INTERNET_ENABLED=true
+export BOUVET_INTERNET_IPV4_PREFIX=172.30
+export BOUVET_INTERNET_OUTBOUND_IFACE=eth0
+export BOUVET_INTERNET_DNS=1.1.1.1,8.8.8.8
+export BOUVET_INTERNET_BLOCKED_CIDRS=203.0.113.10/32
+```
+
+---
+
 ## Logging
 
 | Variable   | Default | Description                                           |
@@ -108,7 +150,7 @@ When HTTP transport is enabled:
 
 | Tool              | Parameters                       | Description                         |
 | ----------------- | -------------------------------- | ----------------------------------- |
-| `create_sandbox`  | —                                | Create a new isolated sandbox       |
+| `create_sandbox`  | `memory_mib`, `vcpu_count`, `internet_access` (optional) | Create a new isolated sandbox |
 | `destroy_sandbox` | `sandbox_id`                     | Destroy a sandbox                   |
 | `list_sandboxes`  | —                                | List all active sandboxes           |
 | `execute_code`    | `sandbox_id`, `language`, `code` | Run code (python, node, bash, rust) |
@@ -137,7 +179,7 @@ Each microVM is allocated:
 | Memory   | 256 MB                        |
 | vCPUs    | 1                             |
 | Disk     | Shared rootfs (copy-on-write) |
-| Network  | Isolated (no external access) |
+| Network  | Isolated by default; optional controlled internet access |
 
 ---
 
@@ -213,6 +255,7 @@ export BOUVET_HTTP_HOST=0.0.0.0
 export BOUVET_HTTP_PORT=8080
 export BOUVET_POOL_ENABLED=true
 export BOUVET_POOL_MIN_SIZE=5
+export BOUVET_INTERNET_ENABLED=false
 export RUST_LOG=info
 ```
 

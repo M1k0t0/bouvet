@@ -107,7 +107,7 @@ mod pool;
 mod sandbox;
 
 pub use client::{AgentClient, ExecResult, FileEntry};
-pub use config::{SandboxConfig, SandboxConfigBuilder};
+pub use config::{InternetAccessConfig, SandboxConfig, SandboxConfigBuilder};
 pub use error::{CoreError, Result};
 pub use manager::{ManagerConfig, SandboxManager};
 pub use pool::{PoolConfig, PoolStats, SandboxPool};

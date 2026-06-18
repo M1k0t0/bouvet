@@ -82,7 +82,7 @@ RUN mkdir -p /etc/systemd/system/multi-user.target.wants && \
 
 # === NETWORK CONFIGURATION ===
 RUN mkdir -p /etc/network && \
-    printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n' > /etc/network/interfaces
+    printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet manual\n' > /etc/network/interfaces
 
 # === FILESYSTEM TABLE ===
 RUN printf '/dev/vda / ext4 defaults 0 1\n' > /etc/fstab

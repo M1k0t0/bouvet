@@ -20,6 +20,10 @@ pub struct CreateSandboxParams {
     /// vCPU count (default: 2).
     #[serde(default)]
     pub vcpu_count: Option<u8>,
+
+    /// Override default internet access for this sandbox.
+    #[serde(default)]
+    pub internet_access: Option<bool>,
 }
 
 /// Result of creating a sandbox.

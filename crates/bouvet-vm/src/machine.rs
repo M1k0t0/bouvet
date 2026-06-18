@@ -3,6 +3,7 @@
 use crate::config::MachineConfig;
 use crate::error::{Result, VmError};
 use crate::machine_config::configure_machine;
+use crate::network::HostNetworkLease;
 use crate::vsock::configure_vsock;
 use firepilot::builder::drive::DriveBuilder;
 use firepilot::builder::executor::FirecrackerExecutorBuilder;
@@ -25,6 +26,8 @@ pub struct VirtualMachine {
     machine: Machine,
     /// Path to the Firecracker API socket
     socket_path: PathBuf,
+    /// Host TAP/NAT resources owned by this VM, if configured.
+    host_network: Option<HostNetworkLease>,
 }
 
 /// Current state of the VM.
@@ -179,38 +182,70 @@ impl VirtualMachine {
         }
 
         // Create the machine (this starts the Firecracker process and socket)
-        tracing::debug!(%id, "Creating Firecracker machine instance");
-        let mut machine = Machine::new();
+        let host_network = if let Some(net) = &config.network {
+            if let Some(host_network) = &net.host_network {
+                tracing::debug!(
+                    %id,
+                    tap = %net.host_dev_name,
+                    host_ip = %host_network.host_ip,
+                    guest_ip = %host_network.guest_ip,
+                    "Setting up host network"
+                );
+                Some(HostNetworkLease::setup(&net.host_dev_name, host_network).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        machine.create(fp_config).await.map_err(|e| {
-            tracing::error!(%id, error = ?e, "Failed to create machine");
-            VmError::Create(format!("{:?}", e))
-        })?;
+        let create_result = async {
+            tracing::debug!(%id, "Creating Firecracker machine instance");
+            let mut machine = Machine::new();
 
-        // Compute socket path: chroot_path / vm_id / firecracker.socket
-        let socket_path = config
-            .chroot_path
-            .join(id.to_string())
-            .join("firecracker.socket");
-        tracing::trace!(%id, socket = %socket_path.display(), "Firecracker socket path");
+            machine.create(fp_config).await.map_err(|e| {
+                tracing::error!(%id, error = ?e, "Failed to create machine");
+                VmError::Create(format!("{:?}", e))
+            })?;
 
-        // Configure machine resources BEFORE starting the VM
-        // This is required - Firecracker needs explicit vcpu/memory config
-        tracing::debug!(%id, "Configuring machine resources");
-        configure_machine(&socket_path, config.vcpu_count, config.memory_mib).await?;
+            // Compute socket path: chroot_path / vm_id / firecracker.socket
+            let socket_path = config
+                .chroot_path
+                .join(id.to_string())
+                .join("firecracker.socket");
+            tracing::trace!(%id, socket = %socket_path.display(), "Firecracker socket path");
 
-        // Configure vsock BEFORE starting the VM (Firecracker requires this)
-        if let Some(vsock_config) = &config.vsock {
-            tracing::debug!(%id, cid = vsock_config.guest_cid, "Configuring vsock");
-            configure_vsock(&socket_path, vsock_config).await?;
+            // Configure machine resources BEFORE starting the VM
+            // This is required - Firecracker needs explicit vcpu/memory config
+            tracing::debug!(%id, "Configuring machine resources");
+            configure_machine(&socket_path, config.vcpu_count, config.memory_mib).await?;
+
+            // Configure vsock BEFORE starting the VM (Firecracker requires this)
+            if let Some(vsock_config) = &config.vsock {
+                tracing::debug!(%id, cid = vsock_config.guest_cid, "Configuring vsock");
+                configure_vsock(&socket_path, vsock_config).await?;
+            }
+
+            // Start the VM
+            tracing::debug!(%id, "Starting VM");
+            machine.start().await.map_err(|e| {
+                tracing::error!(%id, error = ?e, "Failed to start VM");
+                VmError::Start(format!("{:?}", e))
+            })?;
+
+            Ok((machine, socket_path))
         }
+        .await;
 
-        // Start the VM
-        tracing::debug!(%id, "Starting VM");
-        machine.start().await.map_err(|e| {
-            tracing::error!(%id, error = ?e, "Failed to start VM");
-            VmError::Start(format!("{:?}", e))
-        })?;
+        let (machine, socket_path) = match create_result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(lease) = &host_network {
+                    lease.cleanup().await;
+                }
+                return Err(error);
+            }
+        };
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
         tracing::info!(%id, elapsed_ms, "MicroVM started successfully");
@@ -221,6 +256,7 @@ impl VirtualMachine {
             state: VmState::Running,
             machine,
             socket_path,
+            host_network,
         })
     }
 
@@ -348,9 +384,16 @@ impl VirtualMachine {
             let _ = self.kill().await;
         }
 
+        let host_network = self.host_network.take();
+
         // Machine is dropped here, which cleans up resources
         tracing::trace!(id = %self.id, "Dropping machine handle");
         drop(self.machine);
+
+        if let Some(lease) = host_network {
+            tracing::debug!(id = %self.id, "Cleaning up host network");
+            lease.cleanup().await;
+        }
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
         tracing::info!(id = %self.id, elapsed_ms, "VM destroyed");

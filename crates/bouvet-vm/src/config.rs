@@ -2,6 +2,7 @@
 
 use crate::error::{Result, VmError};
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 /// Configuration for creating a new MicroVM.
@@ -96,6 +97,10 @@ impl MachineConfig {
             drive_ids.push(extra.drive_id.clone());
         }
 
+        if let Some(network) = &self.network {
+            network.validate()?;
+        }
+
         Ok(())
     }
 }
@@ -133,6 +138,9 @@ pub struct NetworkConfig {
     pub host_dev_name: String,
     /// Guest MAC address (optional, auto-generated if None)
     pub guest_mac: Option<String>,
+    /// Optional host-side TAP/NAT setup for internet access.
+    #[serde(default)]
+    pub host_network: Option<HostNetworkConfig>,
 }
 
 impl Default for NetworkConfig {
@@ -141,7 +149,122 @@ impl Default for NetworkConfig {
             iface_id: "eth0".into(),
             host_dev_name: "tap0".into(),
             guest_mac: None,
+            host_network: None,
         }
+    }
+}
+
+impl NetworkConfig {
+    /// Validate the network configuration.
+    pub fn validate(&self) -> Result<()> {
+        if self.iface_id.is_empty() {
+            return Err(VmError::Config("network iface_id must not be empty".into()));
+        }
+
+        if self.host_dev_name.is_empty() {
+            return Err(VmError::Config(
+                "network host_dev_name must not be empty".into(),
+            ));
+        }
+
+        // Linux IFNAMSIZ is 16 bytes including the null terminator.
+        if self.host_dev_name.len() > 15 {
+            return Err(VmError::Config(format!(
+                "network host_dev_name must be at most 15 bytes, got {}",
+                self.host_dev_name
+            )));
+        }
+
+        if let Some(host_network) = &self.host_network {
+            host_network.validate()?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Host-side network setup for a Firecracker TAP interface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostNetworkConfig {
+    /// IPv4 address assigned to the host TAP interface.
+    pub host_ip: Ipv4Addr,
+    /// IPv4 address assigned to the guest interface.
+    pub guest_ip: Ipv4Addr,
+    /// IPv4 prefix length assigned to the TAP interface.
+    pub prefix_len: u8,
+    /// Netmask passed to the guest via kernel boot arguments.
+    pub guest_netmask: Ipv4Addr,
+    /// Optional outbound host interface used for MASQUERADE rules.
+    pub outbound_iface: Option<String>,
+    /// Destination CIDRs that internet-enabled guests cannot reach.
+    #[serde(default)]
+    pub blocked_cidrs: Vec<String>,
+    /// Whether to enable IPv4 forwarding with sysctl.
+    pub enable_ip_forward: bool,
+    /// Whether to install per-guest iptables NAT/forwarding rules.
+    pub enable_masquerade: bool,
+}
+
+impl Default for HostNetworkConfig {
+    fn default() -> Self {
+        Self {
+            host_ip: Ipv4Addr::new(172, 30, 0, 1),
+            guest_ip: Ipv4Addr::new(172, 30, 0, 2),
+            prefix_len: 30,
+            guest_netmask: Ipv4Addr::new(255, 255, 255, 252),
+            outbound_iface: None,
+            blocked_cidrs: vec![
+                "0.0.0.0/8".into(),
+                "10.0.0.0/8".into(),
+                "100.64.0.0/10".into(),
+                "127.0.0.0/8".into(),
+                "169.254.0.0/16".into(),
+                "172.16.0.0/12".into(),
+                "172.30.0.0/16".into(),
+                "192.168.0.0/16".into(),
+                "198.18.0.0/15".into(),
+                "224.0.0.0/4".into(),
+                "240.0.0.0/4".into(),
+            ],
+            enable_ip_forward: true,
+            enable_masquerade: true,
+        }
+    }
+}
+
+impl HostNetworkConfig {
+    /// Validate host-side network configuration.
+    pub fn validate(&self) -> Result<()> {
+        if self.prefix_len == 0 || self.prefix_len > 32 {
+            return Err(VmError::Config(format!(
+                "host network prefix_len must be 1-32, got {}",
+                self.prefix_len
+            )));
+        }
+
+        if self.host_ip == self.guest_ip {
+            return Err(VmError::Config(
+                "host network host_ip and guest_ip must differ".into(),
+            ));
+        }
+
+        if let Some(iface) = &self.outbound_iface {
+            if iface.is_empty() {
+                return Err(VmError::Config(
+                    "host network outbound_iface must not be empty".into(),
+                ));
+            }
+        }
+
+        for cidr in &self.blocked_cidrs {
+            if cidr.is_empty() {
+                return Err(VmError::Config(
+                    "host network blocked CIDR must not be empty".into(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -252,6 +375,75 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_network_name() {
+        let config = MachineConfig {
+            network: Some(NetworkConfig {
+                host_dev_name: "tap-name-that-is-too-long".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = MachineConfig {
+            network: Some(NetworkConfig {
+                host_dev_name: "bvt12345678".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_host_network() {
+        let config = MachineConfig {
+            network: Some(NetworkConfig {
+                host_network: Some(HostNetworkConfig {
+                    prefix_len: 0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = MachineConfig {
+            network: Some(NetworkConfig {
+                host_network: Some(HostNetworkConfig {
+                    guest_ip: HostNetworkConfig::default().host_ip,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = MachineConfig {
+            network: Some(NetworkConfig {
+                host_network: Some(HostNetworkConfig::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = MachineConfig {
+            network: Some(NetworkConfig {
+                host_network: Some(HostNetworkConfig {
+                    blocked_cidrs: vec!["".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
     }
 
     #[test]

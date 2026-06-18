@@ -40,9 +40,10 @@ mod config;
 mod error;
 mod machine;
 mod machine_config;
+mod network;
 mod vsock;
 
 pub use builder::VmBuilder;
-pub use config::{DriveConfig, MachineConfig, NetworkConfig, VsockConfig};
+pub use config::{DriveConfig, HostNetworkConfig, MachineConfig, NetworkConfig, VsockConfig};
 pub use error::{Result, VmError};
 pub use machine::{VirtualMachine, VmState};

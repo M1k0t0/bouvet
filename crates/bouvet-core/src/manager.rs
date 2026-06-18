@@ -1,6 +1,6 @@
 //! Sandbox manager for lifecycle management of multiple sandboxes.
 
-use crate::config::SandboxConfig;
+use crate::config::{InternetAccessConfig, SandboxConfig};
 use crate::error::CoreError;
 use crate::sandbox::{Sandbox, SandboxId};
 use std::collections::HashMap;
@@ -22,6 +22,8 @@ pub struct ManagerConfig {
     pub chroot_path: PathBuf,
     /// Maximum number of concurrent sandboxes (default: 100, 0 = unlimited).
     pub max_sandboxes: usize,
+    /// Default internet access configuration for new default sandboxes.
+    pub internet_access: Option<InternetAccessConfig>,
 }
 
 impl ManagerConfig {
@@ -38,7 +40,14 @@ impl ManagerConfig {
             firecracker_path: firecracker_path.into(),
             chroot_path: chroot_path.into(),
             max_sandboxes: 100,
+            internet_access: None,
         }
+    }
+
+    /// Enable internet access for default sandboxes created by this manager.
+    pub fn with_internet_access(mut self, config: InternetAccessConfig) -> Self {
+        self.internet_access = Some(config);
+        self
     }
 }
 
@@ -143,7 +152,15 @@ impl SandboxManager {
         let config = SandboxConfig::builder()
             .kernel(&self.config.kernel_path)
             .rootfs(&self.config.rootfs_path)
-            .build()?;
+            .firecracker_path(&self.config.firecracker_path)
+            .chroot_path(&self.config.chroot_path);
+
+        let config = if let Some(internet_access) = &self.config.internet_access {
+            config.internet_access(internet_access.clone())
+        } else {
+            config
+        }
+        .build()?;
         self.create(config).await
     }
 
